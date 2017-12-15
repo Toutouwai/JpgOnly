@@ -23,6 +23,7 @@ class JpgOnly extends WireData implements Module, ConfigurableModule {
 	public static function getModuleInfo() {
 		return array(
 			'title' => "JPG Only",
+			'version' => '0.0.1',
 			'author' => 'Robin Sallis',
 			'href' => 'https://github.com/Toutouwai/JpgOnly',
 			'summary' => 'Converts PNG and GIF images to JPG format on upload.',
