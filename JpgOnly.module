@@ -1,0 +1,253 @@
+<?php
+namespace ProcessWire;
+/**
+ *
+ * JPG Only
+ *
+ * @author Robin Sallis
+ *
+ * ProcessWire 3.x
+ * Copyright (C) 2011 by Ryan Cramer
+ * Licensed under GNU/GPL v2, see LICENSE.TXT
+ *
+ * http://www.processwire.com
+ * http://www.ryancramer.com
+ *
+ */
+
+class JpgOnly extends WireData implements Module, ConfigurableModule {
+
+	/**
+	 * Module information
+	 */
+	public static function getModuleInfo() {
+		return array(
+			'title' => "JPG Only",
+			'version' => '0.1.0',
+			'author' => 'Robin Sallis',
+			'href' => 'https://github.com/Toutouwai/JpgOnly',
+			'summary' => 'Converts several different image formats to JPG format on upload. The original uploaded file is NOT kept.',
+			'icon' => 'file-image-o',
+			'singular' => true,
+			'autoload' => true,
+		);
+	}
+
+	/**
+	 * Construct
+	 */
+	public function __construct() {
+		// Default config
+		$this->quality = 100;
+		$this->vector_max_width = 1600;
+		$this->vector_max_height = 1600;
+	}
+
+	/**
+	 * Ready
+	 */
+	public function ready() {
+		$this->addHookBefore('InputfieldFile::processInputAddFile', $this, 'imageAdded');
+	}
+
+	/**
+	 * Convert image to JPG format
+	 *
+	 * @param HookEvent $event
+	 */
+	protected function imageAdded(HookEvent $event) {
+
+		$filename = $event->arguments(0);
+		/* @var InputfieldImage $inputfield */
+		$inputfield = $event->object;
+		// Only for InputfieldImage
+		if(!$inputfield instanceof InputfieldImage) return;
+		// Only for ProcessPageEdit
+		if($this->process != 'ProcessPageEdit') return;
+		$page = $this->process->getPage();
+
+		$ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+		// Skip if image is already a JPG
+		if($ext === 'jpg' || $ext === 'jpeg') return;
+
+		// Call hookable method to allow opt-out of conversion
+		if(!$this->allowJpgConversion($filename, $inputfield, $page)) return;
+
+		$pageimages = $inputfield->value;
+		$file = $pageimages->path() . $filename;
+
+		// Get filename of converted file
+		$new_filename = $this->imgToJpg($file, $pageimages);
+		$event->arguments(0, $new_filename);
+
+	}
+
+	/**
+	 * Hookable method to allow opt-out of conversion
+	 *
+	 * @param string $filename
+	 * @param Inputfield $inputfield
+	 * @param Page $page
+	 * @return bool
+	 */
+	public function ___allowJpgConversion($filename, $inputfield, $page) {
+		return true;
+	}
+
+	/**
+	 * Convert image to JPG format
+	 *
+	 * @param string $file Full path of image file to covert
+	 * @param Pageimages $pageimages The Pageimages object this image will be added to
+	 * @return string Full path to JPG conversion
+	 * @throws WireException
+	 * @throws \ImagickException
+	 */
+	public function imgToJpg($file, Pageimages $pageimages) {
+
+		// Required arguments
+		if(!$file || !is_string($file)) throw new WireException($this->_('JpgOnly::imgToJpg first argument must be a full path to an image file.'));
+		if(!$pageimages instanceof Pageimages) throw new WireException($this->_('JpgOnly::imgToJpg second argument must be a Pageimages object.'));
+
+		$dirpath = $pageimages->path();
+
+		// Download if image is remote
+		if(strpos($file, '://') !== false) {
+			$basename = $pageimages->cleanBasename(pathinfo($file, PATHINFO_BASENAME), true, false, true);
+			$destination = $dirpath . $basename;
+			$http = $this->wire(new WireHttp());
+			$http->download($file, $destination);
+			$file = $destination;
+		}
+
+		$path_parts = pathinfo($file);
+		// File extension is required
+		if(!isset($path_parts['extension'])) {
+			$this->session->warning(sprintf($this->_('JpgOnly: Image %s not eligible for conversion because it does not have a file extension.'), $file), true);
+			return $file;
+		}
+		$ext = strtolower($path_parts['extension']);
+
+		// Basename for converted image
+		$basename = $path_parts['filename'] . '.jpg';
+		// Adjust basename if it will clash with an existing file
+		$i = 1;
+		while(is_file($dirpath . $basename)) {
+			$basename = "{$path_parts['filename']}-$i.jpg";
+			$i++;
+		}
+		$filepath = $dirpath . $basename;
+
+		// Use ImageMagick if installed, otherwise GD
+		if(extension_loaded('imagick')) {
+
+			// Use ImageMagick for image conversion
+			if(in_array($ext, array('svg', 'eps', 'ai', 'pdf'))) {
+				$image = new \Imagick();
+				$image->readImage($file);
+				$resolution = $image->getImageResolution();
+				$x_ratio = $resolution['x'] / $image->getImageWidth();
+				$y_ratio = $resolution['y'] / $image->getImageHeight();
+				$x_resolution = (int) $this->vector_max_width * $x_ratio;
+				$y_resolution = (int) $this->vector_max_height * $y_ratio;
+				if($x_resolution && $y_resolution) {
+					$set_resolution = min($x_resolution, $y_resolution);
+				} else {
+					$set_resolution = $x_resolution ?: $y_resolution;
+				}
+				$image->clear();
+				$image->setResolution($set_resolution, $set_resolution);
+				$image->readImage($file);
+			} else {
+				$image = new \Imagick($file);
+			}
+			$image->setImageBackgroundColor('white');
+			$image->mergeImageLayers(\Imagick::LAYERMETHOD_FLATTEN); // Flatten layers if present
+			$image->setImageAlphaChannel(\Imagick::ALPHACHANNEL_REMOVE); // Avoid transparent areas becoming black
+			$image->setImageCompression(\Imagick::COMPRESSION_JPEG);
+			$image->setImageCompressionQuality($this->quality);
+			$image->setImageFormat('jpg');
+			$image->writeImage($filepath);
+
+		} else {
+
+			// Use GD for image conversion
+			if($ext === 'png') {
+				// PNG
+				$image_top = imagecreatefrompng($file);
+				$image = imagecreatetruecolor(imagesx($image_top), imagesy($image_top));
+				imagefill($image, 0, 0, imagecolorallocate($image, 255, 255, 255));
+				imagealphablending($image, true);
+				imagecopy($image, $image_top, 0, 0, 0, 0, imagesx($image_top), imagesy($image_top));
+				imagedestroy($image_top);
+			} elseif($ext === 'gif') {
+				// GIF
+				$image = imagecreatefromgif($file);
+			} elseif($ext === 'webp') {
+				// WEBP
+				if(!function_exists('imagecreatefromwebp')) return $file;
+				$image = imagecreatefromwebp($file);
+			} elseif($ext === 'bmp') {
+				// BMP
+				if(!function_exists('imagecreatefrombmp')) return $file;
+				$image = imagecreatefrombmp($file);
+			} else {
+				// An unsupported extension for GD
+				return $file;
+			}
+			imagejpeg($image, $filepath, $this->quality);
+			imagedestroy($image);
+
+		}
+
+		// Delete original
+		unlink($file);
+
+		return $filepath;
+
+	}
+
+	/**
+	 * Config inputfields
+	 *
+	 * @param InputfieldWrapper $inputfields
+	 */
+	public function getModuleConfigInputfields($inputfields) {
+
+		/* @var InputfieldInteger $f */
+		$f = $this->modules->InputfieldInteger;
+		$f_name = 'quality';
+		$f->name = $f_name;
+		$f->label = $this->_('Quality for JPG conversions');
+		$f->value = $this->$f_name;
+		$f->columnWidth = 30;
+		$inputfields->add($f);
+
+		/* @var InputfieldFieldset $f */
+		$fs = $this->modules->InputfieldFieldset;
+		$fs->name = 'vector_sizing';
+		$fs->label = $this->_('Sizing of vector images');
+		$fs->columnWidth = 70;
+		$inputfields->add($fs);
+
+		/* @var InputfieldInteger $f */
+		$f = $this->modules->InputfieldInteger;
+		$f_name = 'vector_max_width';
+		$f->name = $f_name;
+		$f->label = $this->_('Max width');
+		$f->value = $this->$f_name;
+		$f->columnWidth = 50;
+		$fs->add($f);
+
+		/* @var InputfieldInteger $f */
+		$f = $this->modules->InputfieldInteger;
+		$f_name = 'vector_max_height';
+		$f->name = $f_name;
+		$f->label = $this->_('Max height');
+		$f->value = $this->$f_name;
+		$f->columnWidth = 50;
+		$fs->add($f);
+
+	}
+
+}
